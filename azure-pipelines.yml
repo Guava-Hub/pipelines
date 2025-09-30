@@ -1,14 +1,14 @@
 trigger:
   branches:
     include:
-      - development
+      - mock-development
       - staging
       - main
 
 pr:
   branches:
     include:
-      - development
+      - mock-development
       - staging
       - main
 
@@ -17,7 +17,7 @@ variables:
   dotnetVersion: '8.0.x'
   coverageReportDir: '$(Build.SourcesDirectory)/artifacts/coverage'
   testResultsDir: '$(Build.SourcesDirectory)/artifacts/test-results'
-  azureServiceConnection: '' # Set to the Azure Resource Manager service connection used for deployments
+  azureServiceConnection: 'sc-orderpulse-dev' # Set to the Azure Resource Manager service connection used for deployments
   deploymentConfigPath: 'deployment-map.json'
 
 stages:
