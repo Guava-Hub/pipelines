@@ -282,8 +282,8 @@ stages:
           $command = Get-Command reportgenerator -ErrorAction SilentlyContinue
           if ($command) { return $command.Path }
 
-          $home = if ($env:HOME) { $env:HOME } elseif ($env:USERPROFILE) { $env:USERPROFILE } else { $null }
-          $candidate = if ($home) { Join-Path $home '.dotnet/tools/reportgenerator' } else { $null }
+          $azureHomeDir = if ($env:HOME) { $env:HOME } elseif ($env:USERPROFILE) { $env:USERPROFILE } else { $null }
+          $candidate = if ($azureHomeDir) { Join-Path $azureHomeDir '.dotnet/tools/reportgenerator' } else { $null }
 
           if (-not ($candidate -and (Test-Path $candidate))) {
             Write-Host 'ReportGenerator was not found. Attempting installation via dotnet tool.'
