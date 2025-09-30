@@ -236,6 +236,7 @@ stages:
         buildPlatform: '$(buildConfiguration)'
 
     - script: |
+        export PATH="$PATH:$HOME/.dotnet/tools"
         reportgenerator -reports:"$(Build.SourcesDirectory)/**/coverage.cobertura.xml" -targetdir:"$(coverageReportDir)" -reporttypes:"Cobertura;HtmlInline_AzurePipelines;TextSummary"
       displayName: 'Generate coverage reports'
 
@@ -305,6 +306,7 @@ stages:
       displayName: 'Run full test suite with coverage'
 
     - script: |
+        export PATH="$PATH:$HOME/.dotnet/tools"
         reportgenerator -reports:"$(Build.SourcesDirectory)/**/coverage.cobertura.xml" -targetdir:"$(coverageReportDir)" -reporttypes:"Cobertura;HtmlInline_AzurePipelines;TextSummary"
       displayName: 'Generate coverage reports'
 
