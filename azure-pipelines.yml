@@ -265,10 +265,24 @@ stages:
         testRunTitle: 'Targeted PR tests'
         buildPlatform: '$(buildConfiguration)'
 
-    - script: |
-        export PATH="$PATH:$HOME/.dotnet/tools"
-        mkdir -p "$(coverageReportDir)"
-        reportgenerator -reports:"$(Build.SourcesDirectory)/**/coverage.cobertura.xml" -targetdir:"$(coverageReportDir)" -reporttypes:"Cobertura;HtmlInline_AzurePipelines;TextSummary"
+    - pwsh: |
+        $ErrorActionPreference = 'Stop'
+
+        $reportGeneratorCmd = Get-Command reportgenerator -ErrorAction SilentlyContinue
+        if (-not $reportGeneratorCmd) {
+          $candidate = Join-Path $HOME '.dotnet/tools/reportgenerator'
+          if (-not (Test-Path $candidate)) {
+            throw "ReportGenerator tool was not found on PATH or at $candidate. Ensure the installation step completed successfully."
+          }
+          $reportGeneratorCmd = [pscustomobject]@{ Path = $candidate }
+        }
+
+        New-Item -ItemType Directory -Path '$(coverageReportDir)' -Force | Out-Null
+
+        & $reportGeneratorCmd.Path `
+          "-reports:$(Build.SourcesDirectory)/**/coverage.cobertura.xml" `
+          "-targetdir:$(coverageReportDir)" `
+          "-reporttypes:Cobertura;HtmlInline_AzurePipelines;TextSummary"
       displayName: 'Generate coverage reports'
 
     - task: PublishCodeCoverageResults@2
@@ -336,10 +350,24 @@ stages:
         }
       displayName: 'Run full test suite with coverage'
 
-    - script: |
-        export PATH="$PATH:$HOME/.dotnet/tools"
-        mkdir -p "$(coverageReportDir)"
-        reportgenerator -reports:"$(Build.SourcesDirectory)/**/coverage.cobertura.xml" -targetdir:"$(coverageReportDir)" -reporttypes:"Cobertura;HtmlInline_AzurePipelines;TextSummary"
+    - pwsh: |
+        $ErrorActionPreference = 'Stop'
+
+        $reportGeneratorCmd = Get-Command reportgenerator -ErrorAction SilentlyContinue
+        if (-not $reportGeneratorCmd) {
+          $candidate = Join-Path $HOME '.dotnet/tools/reportgenerator'
+          if (-not (Test-Path $candidate)) {
+            throw "ReportGenerator tool was not found on PATH or at $candidate. Ensure the installation step completed successfully."
+          }
+          $reportGeneratorCmd = [pscustomobject]@{ Path = $candidate }
+        }
+
+        New-Item -ItemType Directory -Path '$(coverageReportDir)' -Force | Out-Null
+
+        & $reportGeneratorCmd.Path `
+          "-reports:$(Build.SourcesDirectory)/**/coverage.cobertura.xml" `
+          "-targetdir:$(coverageReportDir)" `
+          "-reporttypes:Cobertura;HtmlInline_AzurePipelines;TextSummary"
       displayName: 'Generate coverage reports'
 
     - task: PublishTestResults@2
