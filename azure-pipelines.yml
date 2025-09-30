@@ -268,18 +268,34 @@ stages:
     - pwsh: |
         $ErrorActionPreference = 'Stop'
 
-        $reportGeneratorCmd = Get-Command reportgenerator -ErrorAction SilentlyContinue
-        if (-not $reportGeneratorCmd) {
-          $candidate = Join-Path $HOME '.dotnet/tools/reportgenerator'
-          if (-not (Test-Path $candidate)) {
-            throw "ReportGenerator tool was not found on PATH or at $candidate. Ensure the installation step completed successfully."
+        function Resolve-ReportGenerator {
+          $command = Get-Command reportgenerator -ErrorAction SilentlyContinue
+          if ($command) { return $command.Path }
+
+          $home = if ($env:HOME) { $env:HOME } elseif ($env:USERPROFILE) { $env:USERPROFILE } else { $null }
+          $candidate = if ($home) { Join-Path $home '.dotnet/tools/reportgenerator' } else { $null }
+
+          if (-not ($candidate -and (Test-Path $candidate))) {
+            Write-Host 'ReportGenerator was not found. Attempting installation via dotnet tool.'
+            dotnet tool update --global dotnet-reportgenerator-globaltool 2>$null
+            if ($LASTEXITCODE -ne 0) {
+              dotnet tool install --global dotnet-reportgenerator-globaltool
+            }
           }
-          $reportGeneratorCmd = [pscustomobject]@{ Path = $candidate }
+
+          $command = Get-Command reportgenerator -ErrorAction SilentlyContinue
+          if ($command) { return $command.Path }
+
+          if ($candidate -and (Test-Path $candidate)) { return $candidate }
+
+          throw "ReportGenerator tool was not found on PATH or at $candidate. Ensure the installation step completed successfully."
         }
+
+        $reportGeneratorPath = Resolve-ReportGenerator
 
         New-Item -ItemType Directory -Path '$(coverageReportDir)' -Force | Out-Null
 
-        & $reportGeneratorCmd.Path `
+        & $reportGeneratorPath `
           "-reports:$(Build.SourcesDirectory)/**/coverage.cobertura.xml" `
           "-targetdir:$(coverageReportDir)" `
           "-reporttypes:Cobertura;HtmlInline_AzurePipelines;TextSummary"
@@ -353,18 +369,34 @@ stages:
     - pwsh: |
         $ErrorActionPreference = 'Stop'
 
-        $reportGeneratorCmd = Get-Command reportgenerator -ErrorAction SilentlyContinue
-        if (-not $reportGeneratorCmd) {
-          $candidate = Join-Path $HOME '.dotnet/tools/reportgenerator'
-          if (-not (Test-Path $candidate)) {
-            throw "ReportGenerator tool was not found on PATH or at $candidate. Ensure the installation step completed successfully."
+        function Resolve-ReportGenerator {
+          $command = Get-Command reportgenerator -ErrorAction SilentlyContinue
+          if ($command) { return $command.Path }
+
+          $home = if ($env:HOME) { $env:HOME } elseif ($env:USERPROFILE) { $env:USERPROFILE } else { $null }
+          $candidate = if ($home) { Join-Path $home '.dotnet/tools/reportgenerator' } else { $null }
+
+          if (-not ($candidate -and (Test-Path $candidate))) {
+            Write-Host 'ReportGenerator was not found. Attempting installation via dotnet tool.'
+            dotnet tool update --global dotnet-reportgenerator-globaltool 2>$null
+            if ($LASTEXITCODE -ne 0) {
+              dotnet tool install --global dotnet-reportgenerator-globaltool
+            }
           }
-          $reportGeneratorCmd = [pscustomobject]@{ Path = $candidate }
+
+          $command = Get-Command reportgenerator -ErrorAction SilentlyContinue
+          if ($command) { return $command.Path }
+
+          if ($candidate -and (Test-Path $candidate)) { return $candidate }
+
+          throw "ReportGenerator tool was not found on PATH or at $candidate. Ensure the installation step completed successfully."
         }
+
+        $reportGeneratorPath = Resolve-ReportGenerator
 
         New-Item -ItemType Directory -Path '$(coverageReportDir)' -Force | Out-Null
 
-        & $reportGeneratorCmd.Path `
+        & $reportGeneratorPath `
           "-reports:$(Build.SourcesDirectory)/**/coverage.cobertura.xml" `
           "-targetdir:$(coverageReportDir)" `
           "-reporttypes:Cobertura;HtmlInline_AzurePipelines;TextSummary"
