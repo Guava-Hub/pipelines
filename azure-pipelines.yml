@@ -278,25 +278,39 @@ stages:
     - pwsh: |
         $ErrorActionPreference = 'Stop'
 
+        function Get-DotNetToolInstallRoot {
+          if ($env:AGENT_TEMPDIRECTORY) {
+            return (Join-Path $env:AGENT_TEMPDIRECTORY '.dotnet-tools')
+          }
+          if ($env:HOME) {
+            return (Join-Path $env:HOME '.dotnet-tools')
+          }
+          if ($env:USERPROFILE) {
+            return (Join-Path $env:USERPROFILE '.dotnet-tools')
+          }
+          throw 'Unable to determine a writable tool installation directory.'
+        }
+
         function Resolve-ReportGenerator {
           $command = Get-Command reportgenerator -ErrorAction SilentlyContinue
           if ($command) { return $command.Path }
 
-          $azureHomeDir = if ($env:HOME) { $env:HOME } elseif ($env:USERPROFILE) { $env:USERPROFILE } else { $null }
-          $candidate = if ($azureHomeDir) { Join-Path $azureHomeDir '.dotnet/tools/reportgenerator' } else { $null }
+          $toolInstallRoot = Get-DotNetToolInstallRoot
+          New-Item -ItemType Directory -Path $toolInstallRoot -Force | Out-Null
+          $candidate = Join-Path $toolInstallRoot 'reportgenerator'
 
-          if (-not ($candidate -and (Test-Path $candidate))) {
+          if (-not (Test-Path $candidate)) {
             Write-Host 'ReportGenerator was not found. Attempting installation via dotnet tool.'
-            dotnet tool update --global dotnet-reportgenerator-globaltool 2>$null
+            dotnet tool update --tool-path $toolInstallRoot dotnet-reportgenerator-globaltool 2>$null
             if ($LASTEXITCODE -ne 0) {
-              dotnet tool install --global dotnet-reportgenerator-globaltool
+              dotnet tool install --tool-path $toolInstallRoot dotnet-reportgenerator-globaltool
             }
           }
 
           $command = Get-Command reportgenerator -ErrorAction SilentlyContinue
           if ($command) { return $command.Path }
 
-          if ($candidate -and (Test-Path $candidate)) { return $candidate }
+          if (Test-Path $candidate) { return $candidate }
 
           throw "ReportGenerator tool was not found on PATH or at $candidate. Ensure the installation step completed successfully."
         }
@@ -379,25 +393,39 @@ stages:
     - pwsh: |
         $ErrorActionPreference = 'Stop'
 
+        function Get-DotNetToolInstallRoot {
+          if ($env:AGENT_TEMPDIRECTORY) {
+            return (Join-Path $env:AGENT_TEMPDIRECTORY '.dotnet-tools')
+          }
+          if ($env:HOME) {
+            return (Join-Path $env:HOME '.dotnet-tools')
+          }
+          if ($env:USERPROFILE) {
+            return (Join-Path $env:USERPROFILE '.dotnet-tools')
+          }
+          throw 'Unable to determine a writable tool installation directory.'
+        }
+
         function Resolve-ReportGenerator {
           $command = Get-Command reportgenerator -ErrorAction SilentlyContinue
           if ($command) { return $command.Path }
 
-          $home = if ($env:HOME) { $env:HOME } elseif ($env:USERPROFILE) { $env:USERPROFILE } else { $null }
-          $candidate = if ($home) { Join-Path $home '.dotnet/tools/reportgenerator' } else { $null }
+          $toolInstallRoot = Get-DotNetToolInstallRoot
+          New-Item -ItemType Directory -Path $toolInstallRoot -Force | Out-Null
+          $candidate = Join-Path $toolInstallRoot 'reportgenerator'
 
-          if (-not ($candidate -and (Test-Path $candidate))) {
+          if (-not (Test-Path $candidate)) {
             Write-Host 'ReportGenerator was not found. Attempting installation via dotnet tool.'
-            dotnet tool update --global dotnet-reportgenerator-globaltool 2>$null
+            dotnet tool update --tool-path $toolInstallRoot dotnet-reportgenerator-globaltool 2>$null
             if ($LASTEXITCODE -ne 0) {
-              dotnet tool install --global dotnet-reportgenerator-globaltool
+              dotnet tool install --tool-path $toolInstallRoot dotnet-reportgenerator-globaltool
             }
           }
 
           $command = Get-Command reportgenerator -ErrorAction SilentlyContinue
           if ($command) { return $command.Path }
 
-          if ($candidate -and (Test-Path $candidate)) { return $candidate }
+          if (Test-Path $candidate) { return $candidate }
 
           throw "ReportGenerator tool was not found on PATH or at $candidate. Ensure the installation step completed successfully."
         }
