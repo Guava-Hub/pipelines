@@ -1,0 +1,542 @@
+trigger:
+  branches:
+    include:
+      - development
+      - staging
+      - main
+
+pr:
+  branches:
+    include:
+      - development
+      - staging
+      - main
+
+variables:
+  buildConfiguration: 'Release'
+  dotnetVersion: '8.0.x'
+  coverageReportDir: '$(Build.SourcesDirectory)/artifacts/coverage'
+  testResultsDir: '$(Build.SourcesDirectory)/artifacts/test-results'
+  azureServiceConnection: '' # Set to the Azure Resource Manager service connection used for deployments
+  deploymentConfigPath: 'deployment-map.json'
+
+stages:
+- stage: PR_Validation
+  displayName: 'Pull request validation'
+  condition: eq(variables['Build.Reason'], 'PullRequest')
+  jobs:
+  - job: Validate
+    displayName: 'Validate build, tests, and coverage'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - checkout: self
+      clean: true
+      persistCredentials: true
+      fetchDepth: 0
+
+    - task: UseDotNet@2
+      displayName: 'Install .NET SDK'
+      inputs:
+        version: '$(dotnetVersion)'
+
+    - pwsh: |
+        dotnet tool install --global dotnet-reportgenerator-globaltool
+        Write-Host "##vso[task.prependpath]$env:USERPROFILE\.dotnet\tools"
+      displayName: 'Install ReportGenerator tool'
+
+    - pwsh: |
+        $ErrorActionPreference = 'Stop'
+        git config --global --add safe.directory '$(Build.SourcesDirectory)'
+
+        $targetRef = if ($env:System_PullRequest_TargetBranch) { $env:System_PullRequest_TargetBranch } else { 'refs/heads/main' }
+        $targetBranch = $targetRef -replace '^refs/heads/', ''
+        git fetch origin $targetBranch
+        $base = "origin/$targetBranch"
+
+        Write-Host "Using base branch $base"
+
+        $csprojPaths = (git ls-files '*.csproj')
+        if (-not $csprojPaths) {
+          throw 'No .csproj files were found in the repository.'
+        }
+        Write-Host "Discovered the following projects:" $csprojPaths
+
+        foreach ($proj in $csprojPaths) {
+          Write-Host "Restoring $proj"
+          dotnet restore $proj
+          Write-Host "Building $proj"
+          dotnet build $proj --configuration $(buildConfiguration) --no-restore
+        }
+
+        $testProjects = @()
+        foreach ($proj in $csprojPaths) {
+          $content = Get-Content $proj -Raw
+          if ($content -match '<IsTestProject>\s*true\s*</IsTestProject>' -or $proj -match '([Tt]est|[Tt]ests)') {
+            $testProjects += $proj
+          }
+        }
+
+        if (-not $testProjects) {
+          Write-Host '##vso[task.logissue type=warning]No test projects were discovered.'
+          Exit 0
+        }
+
+        $changedFiles = git diff --name-only $base HEAD -- '*.cs'
+        $changedTestFiles = $changedFiles | Where-Object { $_ -match '([Tt]est|[Tt]ests)/' -or $_ -match '([Tt]est|[Tt]ests)\\' -or $_ -match '([Tt]est|[Tt]ests)\.cs$' }
+        if (-not $changedTestFiles) {
+          Write-Host 'No test files were changed in this pull request. Skipping targeted test execution.'
+          Exit 0
+        }
+
+        function Get-ProjectForFile([string]$filePath) {
+          $full = Join-Path '$(Build.SourcesDirectory)' $filePath
+          $directory = Split-Path $full -Parent
+          while ($directory -and (Test-Path $directory)) {
+            $proj = Get-ChildItem -Path $directory -Filter *.csproj -File -ErrorAction SilentlyContinue
+            if ($proj) { return $proj.FullName }
+            $parent = Split-Path $directory -Parent
+            if ($parent -eq $directory) { break }
+            $directory = $parent
+          }
+          return $null
+        }
+
+        $filterMap = @{}
+        foreach ($file in $changedTestFiles) {
+          $projPath = Get-ProjectForFile $file
+          if (-not $projPath) { continue }
+          $projectKey = Resolve-Path $projPath | ForEach-Object { $_.Path }
+          $content = Get-Content (Join-Path '$(Build.SourcesDirectory)' $file)
+          $classMatches = [regex]::Matches(($content -join [Environment]::NewLine), 'class\s+([A-Za-z0-9_]+)')
+          if (-not $classMatches) { continue }
+          if (-not $filterMap.ContainsKey($projectKey)) {
+            $filterMap[$projectKey] = New-Object System.Collections.Generic.List[string]
+          }
+          foreach ($match in $classMatches) {
+            $filterMap[$projectKey].Add($match.Groups[1].Value)
+          }
+        }
+
+        if ($filterMap.Keys.Count -eq 0) {
+          Write-Host 'No test classes were discovered in the changed test files. The pipeline will run the entire affected projects as a fallback.'
+          foreach ($proj in $testProjects) {
+            $projectFullPath = Resolve-Path $proj | ForEach-Object { $_.Path }
+            if (-not $filterMap.ContainsKey($projectFullPath)) {
+              $filterMap[$projectFullPath] = New-Object System.Collections.Generic.List[string]
+              $filterMap[$projectFullPath].Add('*')
+            }
+          }
+        }
+
+        New-Item -ItemType Directory -Path '$(testResultsDir)' -Force | Out-Null
+        New-Item -ItemType Directory -Path '$(coverageReportDir)' -Force | Out-Null
+
+        foreach ($projectPath in $filterMap.Keys) {
+          $filters = ($filterMap[$projectPath] | Sort-Object -Unique)
+          $filterExpression = if ($filters -contains '*') { '' } else { ($filters | ForEach-Object { "FullyQualifiedName~$_" }) -join '|' }
+          $displayFilter = if ([string]::IsNullOrWhiteSpace($filterExpression)) { 'no filter (full test project)' } else { $filterExpression }
+          Write-Host "Running tests for $projectPath with filter: $displayFilter"
+
+          $loggerArg = "trx;LogFileName=$([IO.Path]::GetFileNameWithoutExtension($projectPath))_results.trx"
+          $arguments = @(
+            'test',
+            $projectPath,
+            '--configuration', '$(buildConfiguration)',
+            '--no-restore',
+            '--logger', $loggerArg,
+            '--collect:"XPlat Code Coverage"'
+          )
+
+          if (-not [string]::IsNullOrWhiteSpace($filterExpression)) {
+            $arguments += @('--filter', $filterExpression)
+          }
+
+          dotnet @arguments
+        }
+      displayName: 'Restore and build projects, execute targeted tests'
+
+    - pwsh: |
+        $ErrorActionPreference = 'Stop'
+        git config --global --add safe.directory '$(Build.SourcesDirectory)'
+
+        $targetRef = if ($env:System_PullRequest_TargetBranch) { $env:System_PullRequest_TargetBranch } else { 'refs/heads/main' }
+        $targetBranch = $targetRef -replace '^refs/heads/', ''
+        git fetch origin $targetBranch
+        $base = "origin/$targetBranch"
+
+        $diff = git diff --unified=0 $base HEAD -- '*.cs'
+        if (-not $diff) {
+          Write-Host 'No C# changes detected in this pull request. Skipping coverage validation.'
+          Exit 0
+        }
+
+        $coverageFiles = Get-ChildItem -Path '$(Build.SourcesDirectory)' -Filter 'coverage.cobertura.xml' -Recurse
+        if (-not $coverageFiles) {
+          throw 'No coverage files were generated. Make sure tests executed successfully with code coverage enabled.'
+        }
+
+        [xml]$coverage = Get-Content $coverageFiles[0].FullName
+        $classNodes = @($coverage.coverage.packages.package.classes.class)
+
+        $currentFile = $null
+        $changedLines = @{}
+        foreach ($line in $diff -split "`n") {
+          if ($line -match '^\+\+\+ b/(.*)') {
+            $currentFile = $Matches[1]
+            if (-not $changedLines.ContainsKey($currentFile)) {
+              $changedLines[$currentFile] = New-Object System.Collections.Generic.List[int]
+            }
+            continue
+          }
+          if ($line -match '^@@ [^+]*\+([0-9]+)(?:,([0-9]+))? @@') {
+            $start = [int]$Matches[1]
+            $count = if ($Matches[2]) { [int]$Matches[2] } else { 1 }
+            for ($i = 0; $i -lt $count; $i++) {
+              $lineNumber = $start + $i
+              if ($currentFile -and $changedLines.ContainsKey($currentFile)) {
+                $changedLines[$currentFile].Add($lineNumber)
+              }
+            }
+            continue
+          }
+        }
+
+        foreach ($entry in $changedLines.GetEnumerator()) {
+          $filePath = $entry.Key
+          if ($filePath -match '([Tt]est|[Tt]ests)') { continue }
+
+          $classNode = $classNodes | Where-Object { $_.filename -eq $filePath }
+          if (-not $classNode) {
+            throw "Coverage report does not contain file $filePath. Ensure new or changed code is covered by tests."
+          }
+
+          $lineNodes = @($classNode.lines.line)
+          foreach ($lineNumber in ($entry.Value | Sort-Object -Unique)) {
+            $lineNode = $lineNodes | Where-Object { [int]$_.number -eq $lineNumber }
+            if (-not $lineNode) {
+              throw "Line $lineNumber in $filePath is missing from the coverage report."
+            }
+            if ([int]$lineNode.hits -le 0) {
+              throw "Line $lineNumber in $filePath is not covered by unit tests."
+            }
+          }
+        }
+        Write-Host 'All changed lines are covered by unit tests.'
+      displayName: 'Verify coverage for changed lines'
+
+    - task: PublishTestResults@2
+      displayName: 'Publish test results'
+      inputs:
+        testResultsFormat: 'VSTest'
+        testResultsFiles: '$(Build.SourcesDirectory)/**/*.trx'
+        searchFolder: '$(Build.SourcesDirectory)'
+        mergeTestResults: true
+        testRunTitle: 'Targeted PR tests'
+        buildPlatform: '$(buildConfiguration)'
+
+    - script: |
+        reportgenerator -reports:"$(Build.SourcesDirectory)/**/coverage.cobertura.xml" -targetdir:"$(coverageReportDir)" -reporttypes:"Cobertura;HtmlInline_AzurePipelines;TextSummary"
+      displayName: 'Generate coverage reports'
+
+    - task: PublishCodeCoverageResults@1
+      displayName: 'Publish code coverage results'
+      inputs:
+        codeCoverageTool: Cobertura
+        summaryFileLocation: '$(coverageReportDir)/Cobertura.xml'
+        reportDirectory: '$(coverageReportDir)'
+        failIfCoverageEmpty: true
+
+- stage: Continuous_Integration
+  displayName: 'CI build, test, and deploy'
+  condition: ne(variables['Build.Reason'], 'PullRequest')
+  jobs:
+  - job: BuildTestDeploy
+    displayName: 'Build, test, and deploy changed projects'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - checkout: self
+      clean: true
+      persistCredentials: true
+      fetchDepth: 0
+
+    - task: UseDotNet@2
+      displayName: 'Install .NET SDK'
+      inputs:
+        version: '$(dotnetVersion)'
+
+    - pwsh: |
+        $ErrorActionPreference = 'Stop'
+        git config --global --add safe.directory '$(Build.SourcesDirectory)'
+
+        $csprojPaths = (git ls-files '*.csproj')
+        if (-not $csprojPaths) {
+          throw 'No .csproj files were found in the repository.'
+        }
+
+        foreach ($proj in $csprojPaths) {
+          Write-Host "Restoring $proj"
+          dotnet restore $proj
+        }
+
+        dotnet build --configuration $(buildConfiguration) --no-restore
+      displayName: 'Restore and build entire solution'
+
+    - pwsh: |
+        $ErrorActionPreference = 'Stop'
+        New-Item -ItemType Directory -Path '$(testResultsDir)' -Force | Out-Null
+        New-Item -ItemType Directory -Path '$(coverageReportDir)' -Force | Out-Null
+
+        $testProjects = git ls-files '*.csproj' | Where-Object {
+          $content = Get-Content $_ -Raw
+          $content -match '<IsTestProject>\s*true\s*</IsTestProject>' -or $_ -match '([Tt]est|[Tt]ests)'
+        }
+
+        if (-not $testProjects) {
+          Write-Host '##vso[task.logissue type=warning]No test projects were discovered.'
+          Exit 0
+        }
+
+        foreach ($proj in $testProjects) {
+          $loggerArg = "trx;LogFileName=$([IO.Path]::GetFileNameWithoutExtension($proj))_results.trx"
+          dotnet test $proj --configuration $(buildConfiguration) --no-restore --logger "$loggerArg" --collect:"XPlat Code Coverage"
+        }
+      displayName: 'Run full test suite with coverage'
+
+    - script: |
+        reportgenerator -reports:"$(Build.SourcesDirectory)/**/coverage.cobertura.xml" -targetdir:"$(coverageReportDir)" -reporttypes:"Cobertura;HtmlInline_AzurePipelines;TextSummary"
+      displayName: 'Generate coverage reports'
+
+    - task: PublishTestResults@2
+      displayName: 'Publish full test results'
+      inputs:
+        testResultsFormat: 'VSTest'
+        testResultsFiles: '$(Build.SourcesDirectory)/**/*.trx'
+        searchFolder: '$(Build.SourcesDirectory)'
+        mergeTestResults: true
+        testRunTitle: 'Full test suite'
+        buildPlatform: '$(buildConfiguration)'
+
+    - task: PublishCodeCoverageResults@1
+      displayName: 'Publish code coverage results'
+      inputs:
+        codeCoverageTool: Cobertura
+        summaryFileLocation: '$(coverageReportDir)/Cobertura.xml'
+        reportDirectory: '$(coverageReportDir)'
+        failIfCoverageEmpty: true
+
+    - pwsh: |
+        $ErrorActionPreference = 'Stop'
+        git config --global --add safe.directory '$(Build.SourcesDirectory)'
+
+        Write-Host '##vso[task.setvariable variable=deploymentPlanPath]'
+
+        $sourceBranch = $env:Build_SourceBranch
+        Write-Host "Computing changes for branch $sourceBranch"
+
+        git fetch origin $sourceBranch
+        $currentCommit = $(git rev-parse HEAD)
+        $history = git rev-list --max-count=2 HEAD
+        $previousCommit = ($history | Select-Object -Last 1)
+
+        if (-not $previousCommit) {
+          Write-Host 'Only one commit detected on branch. All projects will be considered changed.'
+          $changedPaths = git ls-files '*.csproj'
+        }
+        else {
+          Write-Host "Current commit: $currentCommit"
+          Write-Host "Previous commit: $previousCommit"
+          $changedPaths = git diff --name-only $previousCommit $currentCommit -- '*.csproj' '*.cs'
+        }
+
+        if (-not $changedPaths) {
+          Write-Host 'No project changes detected. Skipping deployment phase.'
+          Write-Host '##vso[task.setvariable variable=deploymentPlanPath]'
+          Exit 0
+        }
+
+        function Get-ProjectRoot([string]$path) {
+          $fullPath = Join-Path '$(Build.SourcesDirectory)' $path
+          if (Test-Path $fullPath -PathType Leaf -and $fullPath.EndsWith('.csproj')) {
+            return $fullPath
+          }
+          $directory = Split-Path $fullPath -Parent
+          while ($directory -and (Test-Path $directory)) {
+            $proj = Get-ChildItem -Path $directory -Filter *.csproj -File -ErrorAction SilentlyContinue
+            if ($proj) { return $proj.FullName }
+            $parent = Split-Path $directory -Parent
+            if ($parent -eq $directory) { break }
+            $directory = $parent
+          }
+          return $null
+        }
+
+        $projectsToDeploy = New-Object System.Collections.Generic.HashSet[string]
+        foreach ($path in $changedPaths) {
+          $proj = Get-ProjectRoot $path
+          if ($proj) { $projectsToDeploy.Add($proj) | Out-Null }
+        }
+
+        if ($projectsToDeploy.Count -eq 0) {
+          Write-Host 'No deployable projects detected.'
+          Write-Host '##vso[task.setvariable variable=deploymentPlanPath]'
+          Exit 0
+        }
+
+        $deploymentConfigPath = Join-Path '$(Build.SourcesDirectory)' '$(deploymentConfigPath)'
+        if (-not (Test-Path $deploymentConfigPath)) {
+          throw "Deployment configuration file not found at $deploymentConfigPath."
+        }
+
+        $deploymentSettings = Get-Content $deploymentConfigPath -Raw | ConvertFrom-Json
+        if (-not $deploymentSettings -or -not $deploymentSettings.projects) {
+          throw 'Deployment configuration must define a projects array.'
+        }
+
+        $artifactRoot = '$(Build.ArtifactStagingDirectory)'
+        New-Item -ItemType Directory -Path $artifactRoot -Force | Out-Null
+        $publishRoot = Join-Path $artifactRoot 'publish'
+        New-Item -ItemType Directory -Path $publishRoot -Force | Out-Null
+
+        $plan = @()
+
+        Write-Host 'The following projects will be evaluated for deployment based on detected changes:'
+        $projectsToDeploy | ForEach-Object { Write-Host " - $_" }
+
+        foreach ($proj in $projectsToDeploy) {
+          $absoluteProj = Resolve-Path $proj | ForEach-Object { $_.Path }
+          $relativeProj = [System.IO.Path]::GetRelativePath('$(Build.SourcesDirectory)', $absoluteProj)
+          $content = Get-Content $absoluteProj -Raw
+
+          $projectType = if ($content -match 'Microsoft\.NET\.Sdk\.Functions') {
+            'functionApp'
+          }
+          elseif ($content -match 'Microsoft\.NET\.Sdk\.Web') {
+            'appService'
+          }
+          else {
+            Write-Host "##vso[task.logissue type=warning]Skipping $relativeProj because it is not recognized as an Azure App Service or Function App project."
+            continue
+          }
+
+          $mapping = $deploymentSettings.projects | Where-Object { $_.path -ieq $relativeProj }
+          if (-not $mapping) {
+            throw "Deployment mapping for project $relativeProj was not found in $(deploymentConfigPath)."
+          }
+          if ($mapping -is [System.Array]) {
+            $mapping = $mapping[0]
+          }
+
+          if ($mapping.type -and $mapping.type -ne $projectType) {
+            throw "Deployment mapping for $relativeProj declares type '$($mapping.type)', but the project was detected as '$projectType'."
+          }
+
+          if ([string]::IsNullOrWhiteSpace($mapping.resourceGroup) -or [string]::IsNullOrWhiteSpace($mapping.appName)) {
+            throw "Deployment mapping for $relativeProj must include both resourceGroup and appName."
+          }
+
+          $publishDir = Join-Path $publishRoot ([System.IO.Path]::GetFileNameWithoutExtension($absoluteProj))
+          New-Item -ItemType Directory -Path $publishDir -Force | Out-Null
+
+          dotnet publish $absoluteProj --configuration $(buildConfiguration) --output $publishDir --no-restore
+
+          $zipPath = "$publishDir.zip"
+          if (Test-Path $zipPath) {
+            Remove-Item $zipPath -Force
+          }
+
+          $itemsToCompress = Get-ChildItem -Path $publishDir
+          if (-not $itemsToCompress) {
+            throw "Publish output for $relativeProj is empty; nothing to deploy."
+          }
+          Compress-Archive -Path ($itemsToCompress | ForEach-Object { $_.FullName }) -DestinationPath $zipPath -Force
+
+          Write-Host "Prepared deployment package for $relativeProj ($projectType) targeting $($mapping.appName)"
+
+          $plan += [pscustomobject]@{
+            projectPath = $relativeProj
+            type = $projectType
+            appName = $mapping.appName
+            resourceGroup = $mapping.resourceGroup
+            slot = $mapping.slot
+            zipPath = $zipPath
+          }
+        }
+
+        if (-not $plan -or $plan.Count -eq 0) {
+          Write-Host 'No deployable projects matched the deployment configuration. Skipping deployment.'
+          Write-Host '##vso[task.setvariable variable=deploymentPlanPath]'
+          Exit 0
+        }
+
+        $planObject = [pscustomobject]@{ projects = $plan }
+        $planPath = Join-Path $artifactRoot 'deployment-plan.json'
+        $planObject | ConvertTo-Json -Depth 5 | Set-Content -Path $planPath -Encoding UTF8
+        Write-Host "Deployment plan written to $planPath"
+        Write-Host "##vso[task.setvariable variable=deploymentPlanPath]$planPath"
+      displayName: 'Prepare deployment plan for changed projects'
+
+    - task: AzureCLI@2
+      displayName: 'Deploy changed Azure Web Apps and Function Apps'
+      condition: and(succeeded(), ne(variables['deploymentPlanPath'], ''), ne(variables['azureServiceConnection'], ''))
+      inputs:
+        azureSubscription: '$(azureServiceConnection)'
+        scriptType: 'pscore'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          $ErrorActionPreference = 'Stop'
+          $planPath = '$(deploymentPlanPath)'
+          if (-not (Test-Path $planPath)) {
+            Write-Host "Deployment plan $planPath was not found. Skipping deployment."
+            return
+          }
+
+          $plan = Get-Content $planPath -Raw | ConvertFrom-Json
+          if (-not $plan -or -not $plan.projects -or $plan.projects.Count -eq 0) {
+            Write-Host 'Deployment plan is empty. Nothing to deploy.'
+            return
+          }
+
+          foreach ($item in $plan.projects) {
+            if (-not (Test-Path $item.zipPath)) {
+              throw "Published package $($item.zipPath) not found for project $($item.projectPath)."
+            }
+
+            switch ($item.type) {
+              'appService' {
+                $arguments = @(
+                  'webapp', 'deploy',
+                  '--resource-group', $item.resourceGroup,
+                  '--name', $item.appName,
+                  '--src-path', $item.zipPath,
+                  '--type', 'zip'
+                )
+                if ($item.slot -and $item.slot.Trim()) {
+                  $arguments += @('--slot', $item.slot)
+                }
+
+                Write-Host "Deploying $($item.projectPath) to Azure App Service $($item.appName)"
+                az @arguments
+              }
+              'functionApp' {
+                $arguments = @(
+                  'functionapp', 'deployment', 'source', 'config-zip',
+                  '--resource-group', $item.resourceGroup,
+                  '--name', $item.appName,
+                  '--src', $item.zipPath
+                )
+                if ($item.slot -and $item.slot.Trim()) {
+                  $arguments += @('--slot', $item.slot)
+                }
+
+                Write-Host "Deploying $($item.projectPath) to Azure Function App $($item.appName)"
+                az @arguments
+              }
+              default {
+                throw "Unknown deployment type '$($item.type)' for project $($item.projectPath)."
+              }
+            }
+          }
+      env:
+        AZURE_CORE_ONLY_SHOW_ERRORS: 'True'
