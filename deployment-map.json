@@ -1,0 +1,17 @@
+{
+  "projects": [
+    {
+      "path": "src/YourWebApp/YourWebApp.csproj",
+      "type": "appService",
+      "resourceGroup": "rg-your-webapps",
+      "appName": "your-webapp-name",
+      "slot": "production"
+    },
+    {
+      "path": "src/YourFunction/YourFunction.csproj",
+      "type": "functionApp",
+      "resourceGroup": "rg-your-functions",
+      "appName": "your-function-name"
+    }
+  ]
+}
