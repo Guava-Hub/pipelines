@@ -107,25 +107,64 @@ stages:
           return $null
         }
 
-        $filterMap = @{}
+        function Invoke-ProjectTests {
+          param(
+            [Parameter(Mandatory = $true)]
+            [string] $ProjectPath,
+            [string[]] $TestFilters
+          )
+
+          $filters = @()
+          if ($TestFilters) {
+            $filters = $TestFilters | Sort-Object -Unique
+          }
+
+          $filterExpression = if ($filters -contains '*') { '' } elseif ($filters.Count -gt 0) { ($filters | ForEach-Object { "FullyQualifiedName~$_" }) -join '|' } else { '' }
+          $displayFilter = if ([string]::IsNullOrWhiteSpace($filterExpression)) { 'no filter (full test project)' } else { $filterExpression }
+          Write-Host "Running tests for $ProjectPath with filter: $displayFilter"
+
+          $loggerArg = "trx;LogFileName=$([IO.Path]::GetFileNameWithoutExtension($ProjectPath))_results.trx"
+          $arguments = @(
+            'test',
+            $ProjectPath,
+            '--configuration', '$(buildConfiguration)',
+            '--no-restore',
+            '--logger', $loggerArg,
+            '--collect:"XPlat Code Coverage"'
+          )
+
+          if (-not [string]::IsNullOrWhiteSpace($filterExpression)) {
+            $arguments += @('--filter', $filterExpression)
+          }
+
+          dotnet @arguments
+        }
+
+        New-Item -ItemType Directory -Path '$(testResultsDir)' -Force | Out-Null
+        New-Item -ItemType Directory -Path '$(coverageReportDir)' -Force | Out-Null
 
         if (-not $changedTestFiles) {
-          Write-Host 'No test files were changed in this pull request. Running the entire affected test projects.'
+          Write-Host 'No test files were changed in this pull request. Running the entire test suite for discovered test projects.'
+          foreach ($proj in $testProjects) {
+            $projectFullPath = Resolve-Path $proj | ForEach-Object { $_.Path }
+            Invoke-ProjectTests -ProjectPath $projectFullPath -TestFilters @('*')
+          }
+          return
         }
-        else {
-          foreach ($file in $changedTestFiles) {
-            $projPath = Get-ProjectForFile $file
-            if (-not $projPath) { continue }
-            $projectKey = Resolve-Path $projPath | ForEach-Object { $_.Path }
-            $content = Get-Content (Join-Path '$(Build.SourcesDirectory)' $file)
-            $classMatches = [regex]::Matches(($content -join [Environment]::NewLine), 'class\s+([A-Za-z0-9_]+)')
-            if (-not $classMatches) { continue }
-            if (-not $filterMap.ContainsKey($projectKey)) {
-              $filterMap[$projectKey] = New-Object System.Collections.Generic.List[string]
-            }
-            foreach ($match in $classMatches) {
-              $filterMap[$projectKey].Add($match.Groups[1].Value)
-            }
+
+        $filterMap = @{}
+        foreach ($file in $changedTestFiles) {
+          $projPath = Get-ProjectForFile $file
+          if (-not $projPath) { continue }
+          $projectKey = Resolve-Path $projPath | ForEach-Object { $_.Path }
+          $content = Get-Content (Join-Path '$(Build.SourcesDirectory)' $file)
+          $classMatches = [regex]::Matches(($content -join [Environment]::NewLine), 'class\s+([A-Za-z0-9_]+)')
+          if (-not $classMatches) { continue }
+          if (-not $filterMap.ContainsKey($projectKey)) {
+            $filterMap[$projectKey] = New-Object System.Collections.Generic.List[string]
+          }
+          foreach ($match in $classMatches) {
+            $filterMap[$projectKey].Add($match.Groups[1].Value)
           }
         }
 
@@ -141,42 +180,9 @@ stages:
             }
           }
         }
-        elseif (-not $changedTestFiles) {
-          foreach ($proj in $testProjects) {
-            $projectFullPath = Resolve-Path $proj | ForEach-Object { $_.Path }
-            if (-not $filterMap.ContainsKey($projectFullPath)) {
-              $filterMap[$projectFullPath] = New-Object System.Collections.Generic.List[string]
-            }
-            if (-not ($filterMap[$projectFullPath] -contains '*')) {
-              $filterMap[$projectFullPath].Add('*')
-            }
-          }
-        }
-
-        New-Item -ItemType Directory -Path '$(testResultsDir)' -Force | Out-Null
-        New-Item -ItemType Directory -Path '$(coverageReportDir)' -Force | Out-Null
 
         foreach ($projectPath in $filterMap.Keys) {
-          $filters = ($filterMap[$projectPath] | Sort-Object -Unique)
-          $filterExpression = if ($filters -contains '*') { '' } else { ($filters | ForEach-Object { "FullyQualifiedName~$_" }) -join '|' }
-          $displayFilter = if ([string]::IsNullOrWhiteSpace($filterExpression)) { 'no filter (full test project)' } else { $filterExpression }
-          Write-Host "Running tests for $projectPath with filter: $displayFilter"
-
-          $loggerArg = "trx;LogFileName=$([IO.Path]::GetFileNameWithoutExtension($projectPath))_results.trx"
-          $arguments = @(
-            'test',
-            $projectPath,
-            '--configuration', '$(buildConfiguration)',
-            '--no-restore',
-            '--logger', $loggerArg,
-            '--collect:"XPlat Code Coverage"'
-          )
-
-          if (-not [string]::IsNullOrWhiteSpace($filterExpression)) {
-            $arguments += @('--filter', $filterExpression)
-          }
-
-          dotnet @arguments
+          Invoke-ProjectTests -ProjectPath $projectPath -TestFilters $filterMap[$projectPath]
         }
       displayName: 'Restore and build projects, execute targeted tests'
 
