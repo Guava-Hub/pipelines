@@ -1,14 +1,14 @@
 trigger:
   branches:
     include:
-      - development
+      - mock-development
       - staging
       - main
 
 pr:
   branches:
     include:
-      - development
+      - mock-development
       - staging
       - main
 
@@ -17,7 +17,7 @@ variables:
   dotnetVersion: '8.0.x'
   coverageReportDir: '$(Build.SourcesDirectory)/artifacts/coverage'
   testResultsDir: '$(Build.SourcesDirectory)/artifacts/test-results'
-  azureServiceConnection: '' # Set to the Azure Resource Manager service connection used for deployments
+  azureServiceConnection: 'sc-orderpulse-dev' # Set to the Azure Resource Manager service connection used for deployments
   deploymentConfigPath: 'deployment-map.json'
 
 stages:
@@ -43,15 +43,22 @@ stages:
     - pwsh: |
         $ErrorActionPreference = 'Stop'
 
-        dotnet tool update --global dotnet-reportgenerator-globaltool 2>$null
+        $toolRoot = Join-Path '$(Pipeline.Workspace)' '.dotnet-tools'
+        New-Item -ItemType Directory -Path $toolRoot -Force | Out-Null
+
+        dotnet tool update dotnet-reportgenerator-globaltool --tool-path $toolRoot 2>$null
         if ($LASTEXITCODE -ne 0) {
-          dotnet tool install --global dotnet-reportgenerator-globaltool
+          dotnet tool install dotnet-reportgenerator-globaltool --tool-path $toolRoot
         }
 
-        $home = if ($env:HOME) { $env:HOME } else { $env:USERPROFILE }
-        $dotnetFolder = Join-Path $home '.dotnet'
-        $toolPath = Join-Path $dotnetFolder 'tools'
-        Write-Host "##vso[task.prependpath]$toolPath"
+        $exeName = if ($IsWindows) { 'reportgenerator.exe' } else { 'reportgenerator' }
+        $reportGeneratorPath = Join-Path $toolRoot $exeName
+        if (-not (Test-Path $reportGeneratorPath)) {
+          throw "ReportGenerator executable was not found at $reportGeneratorPath after installation."
+        }
+
+        Write-Host "##vso[task.prependpath]$toolRoot"
+        Write-Host "##vso[task.setvariable variable=ReportGeneratorExecutable]$reportGeneratorPath"
       displayName: 'Install ReportGenerator tool'
 
     - pwsh: |
@@ -93,10 +100,6 @@ stages:
 
         $changedFiles = git diff --name-only $base HEAD -- '*.cs'
         $changedTestFiles = $changedFiles | Where-Object { $_ -match '([Tt]est|[Tt]ests)/' -or $_ -match '([Tt]est|[Tt]ests)\\' -or $_ -match '([Tt]est|[Tt]ests)\.cs$' }
-        if (-not $changedTestFiles) {
-          Write-Host 'No test files were changed in this pull request. Skipping targeted test execution.'
-          Exit 0
-        }
 
         function Get-ProjectForFile([string]$filePath) {
           $full = Join-Path '$(Build.SourcesDirectory)' $filePath
@@ -109,6 +112,51 @@ stages:
             $directory = $parent
           }
           return $null
+        }
+
+        function Invoke-ProjectTests {
+          param(
+            [Parameter(Mandatory = $true)]
+            [string] $ProjectPath,
+            [string[]] $TestFilters
+          )
+
+          $filters = @()
+          if ($TestFilters) {
+            $filters = $TestFilters | Sort-Object -Unique
+          }
+
+          $filterExpression = if ($filters -contains '*') { '' } elseif ($filters.Count -gt 0) { ($filters | ForEach-Object { "FullyQualifiedName~$_" }) -join '|' } else { '' }
+          $displayFilter = if ([string]::IsNullOrWhiteSpace($filterExpression)) { 'no filter (full test project)' } else { $filterExpression }
+          Write-Host "Running tests for $ProjectPath with filter: $displayFilter"
+
+          $loggerArg = "trx;LogFileName=$([IO.Path]::GetFileNameWithoutExtension($ProjectPath))_results.trx"
+          $arguments = @(
+            'test',
+            $ProjectPath,
+            '--configuration', '$(buildConfiguration)',
+            '--no-restore',
+            '--logger', $loggerArg,
+            '--collect:"XPlat Code Coverage"'
+          )
+
+          if (-not [string]::IsNullOrWhiteSpace($filterExpression)) {
+            $arguments += @('--filter', $filterExpression)
+          }
+
+          dotnet @arguments
+        }
+
+        New-Item -ItemType Directory -Path '$(testResultsDir)' -Force | Out-Null
+        New-Item -ItemType Directory -Path '$(coverageReportDir)' -Force | Out-Null
+
+        if (-not $changedTestFiles) {
+          Write-Host 'No test files were changed in this pull request. Running the entire test suite for discovered test projects.'
+          foreach ($proj in $testProjects) {
+            $projectFullPath = Resolve-Path $proj | ForEach-Object { $_.Path }
+            Invoke-ProjectTests -ProjectPath $projectFullPath -TestFilters @('*')
+          }
+          return
         }
 
         $filterMap = @{}
@@ -128,40 +176,20 @@ stages:
         }
 
         if ($filterMap.Keys.Count -eq 0) {
-          Write-Host 'No test classes were discovered in the changed test files. The pipeline will run the entire affected projects as a fallback.'
+          Write-Host 'No targeted test classes were identified. The pipeline will run the entire affected test projects.'
           foreach ($proj in $testProjects) {
             $projectFullPath = Resolve-Path $proj | ForEach-Object { $_.Path }
             if (-not $filterMap.ContainsKey($projectFullPath)) {
               $filterMap[$projectFullPath] = New-Object System.Collections.Generic.List[string]
+            }
+            if (-not ($filterMap[$projectFullPath] -contains '*')) {
               $filterMap[$projectFullPath].Add('*')
             }
           }
         }
 
-        New-Item -ItemType Directory -Path '$(testResultsDir)' -Force | Out-Null
-        New-Item -ItemType Directory -Path '$(coverageReportDir)' -Force | Out-Null
-
         foreach ($projectPath in $filterMap.Keys) {
-          $filters = ($filterMap[$projectPath] | Sort-Object -Unique)
-          $filterExpression = if ($filters -contains '*') { '' } else { ($filters | ForEach-Object { "FullyQualifiedName~$_" }) -join '|' }
-          $displayFilter = if ([string]::IsNullOrWhiteSpace($filterExpression)) { 'no filter (full test project)' } else { $filterExpression }
-          Write-Host "Running tests for $projectPath with filter: $displayFilter"
-
-          $loggerArg = "trx;LogFileName=$([IO.Path]::GetFileNameWithoutExtension($projectPath))_results.trx"
-          $arguments = @(
-            'test',
-            $projectPath,
-            '--configuration', '$(buildConfiguration)',
-            '--no-restore',
-            '--logger', $loggerArg,
-            '--collect:"XPlat Code Coverage"'
-          )
-
-          if (-not [string]::IsNullOrWhiteSpace($filterExpression)) {
-            $arguments += @('--filter', $filterExpression)
-          }
-
-          dotnet @arguments
+          Invoke-ProjectTests -ProjectPath $projectPath -TestFilters $filterMap[$projectPath]
         }
       displayName: 'Restore and build projects, execute targeted tests'
 
@@ -244,10 +272,27 @@ stages:
         testRunTitle: 'Targeted PR tests'
         buildPlatform: '$(buildConfiguration)'
 
-    - script: |
-        export PATH="$PATH:$HOME/.dotnet/tools"
-        mkdir -p "$(coverageReportDir)"
-        reportgenerator -reports:"$(Build.SourcesDirectory)/**/coverage.cobertura.xml" -targetdir:"$(coverageReportDir)" -reporttypes:"Cobertura;HtmlInline_AzurePipelines;TextSummary"
+    - pwsh: |
+        $ErrorActionPreference = 'Stop'
+
+        $reportGeneratorPath = '$(ReportGeneratorExecutable)'
+        if ([string]::IsNullOrWhiteSpace($reportGeneratorPath) -or -not (Test-Path $reportGeneratorPath)) {
+          $reportGeneratorCmd = Get-Command reportgenerator -ErrorAction SilentlyContinue
+          if ($reportGeneratorCmd) {
+            $reportGeneratorPath = $reportGeneratorCmd.Path
+          }
+        }
+
+        if ([string]::IsNullOrWhiteSpace($reportGeneratorPath) -or -not (Test-Path $reportGeneratorPath)) {
+          throw 'ReportGenerator executable could not be located. Confirm the installation step completed successfully.'
+        }
+
+        New-Item -ItemType Directory -Path '$(coverageReportDir)' -Force | Out-Null
+
+        & $reportGeneratorPath `
+          "-reports:$(Build.SourcesDirectory)/**/coverage.cobertura.xml" `
+          "-targetdir:$(coverageReportDir)" `
+          "-reporttypes:Cobertura;HtmlInline_AzurePipelines;TextSummary"
       displayName: 'Generate coverage reports'
 
     - task: PublishCodeCoverageResults@2
@@ -315,10 +360,27 @@ stages:
         }
       displayName: 'Run full test suite with coverage'
 
-    - script: |
-        export PATH="$PATH:$HOME/.dotnet/tools"
-        mkdir -p "$(coverageReportDir)"
-        reportgenerator -reports:"$(Build.SourcesDirectory)/**/coverage.cobertura.xml" -targetdir:"$(coverageReportDir)" -reporttypes:"Cobertura;HtmlInline_AzurePipelines;TextSummary"
+    - pwsh: |
+        $ErrorActionPreference = 'Stop'
+
+        $reportGeneratorPath = '$(ReportGeneratorExecutable)'
+        if ([string]::IsNullOrWhiteSpace($reportGeneratorPath) -or -not (Test-Path $reportGeneratorPath)) {
+          $reportGeneratorCmd = Get-Command reportgenerator -ErrorAction SilentlyContinue
+          if ($reportGeneratorCmd) {
+            $reportGeneratorPath = $reportGeneratorCmd.Path
+          }
+        }
+
+        if ([string]::IsNullOrWhiteSpace($reportGeneratorPath) -or -not (Test-Path $reportGeneratorPath)) {
+          throw 'ReportGenerator executable could not be located. Confirm the installation step completed successfully.'
+        }
+
+        New-Item -ItemType Directory -Path '$(coverageReportDir)' -Force | Out-Null
+
+        & $reportGeneratorPath `
+          "-reports:$(Build.SourcesDirectory)/**/coverage.cobertura.xml" `
+          "-targetdir:$(coverageReportDir)" `
+          "-reporttypes:Cobertura;HtmlInline_AzurePipelines;TextSummary"
       displayName: 'Generate coverage reports'
 
     - task: PublishTestResults@2
