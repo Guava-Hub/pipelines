@@ -337,8 +337,10 @@ stages:
         else {
           Write-Host "Current commit: $currentCommit"
           Write-Host "Previous commit: $previousCommit"
-          $changedPaths = git diff --name-only $previousCommit $currentCommit -- '*.csproj' '*.cs'
+          $changedPaths = git diff --name-only $previousCommit $currentCommit
         }
+
+        $changedPaths = $changedPaths | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
 
         if (-not $changedPaths) {
           Write-Host 'No project changes detected. Skipping deployment phase.'
