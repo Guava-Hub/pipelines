@@ -93,10 +93,6 @@ stages:
 
         $changedFiles = git diff --name-only $base HEAD -- '*.cs'
         $changedTestFiles = $changedFiles | Where-Object { $_ -match '([Tt]est|[Tt]ests)/' -or $_ -match '([Tt]est|[Tt]ests)\\' -or $_ -match '([Tt]est|[Tt]ests)\.cs$' }
-        if (-not $changedTestFiles) {
-          Write-Host 'No test files were changed in this pull request. Skipping targeted test execution.'
-          Exit 0
-        }
 
         function Get-ProjectForFile([string]$filePath) {
           $full = Join-Path '$(Build.SourcesDirectory)' $filePath
@@ -112,27 +108,46 @@ stages:
         }
 
         $filterMap = @{}
-        foreach ($file in $changedTestFiles) {
-          $projPath = Get-ProjectForFile $file
-          if (-not $projPath) { continue }
-          $projectKey = Resolve-Path $projPath | ForEach-Object { $_.Path }
-          $content = Get-Content (Join-Path '$(Build.SourcesDirectory)' $file)
-          $classMatches = [regex]::Matches(($content -join [Environment]::NewLine), 'class\s+([A-Za-z0-9_]+)')
-          if (-not $classMatches) { continue }
-          if (-not $filterMap.ContainsKey($projectKey)) {
-            $filterMap[$projectKey] = New-Object System.Collections.Generic.List[string]
-          }
-          foreach ($match in $classMatches) {
-            $filterMap[$projectKey].Add($match.Groups[1].Value)
+
+        if (-not $changedTestFiles) {
+          Write-Host 'No test files were changed in this pull request. Running the entire affected test projects.'
+        }
+        else {
+          foreach ($file in $changedTestFiles) {
+            $projPath = Get-ProjectForFile $file
+            if (-not $projPath) { continue }
+            $projectKey = Resolve-Path $projPath | ForEach-Object { $_.Path }
+            $content = Get-Content (Join-Path '$(Build.SourcesDirectory)' $file)
+            $classMatches = [regex]::Matches(($content -join [Environment]::NewLine), 'class\s+([A-Za-z0-9_]+)')
+            if (-not $classMatches) { continue }
+            if (-not $filterMap.ContainsKey($projectKey)) {
+              $filterMap[$projectKey] = New-Object System.Collections.Generic.List[string]
+            }
+            foreach ($match in $classMatches) {
+              $filterMap[$projectKey].Add($match.Groups[1].Value)
+            }
           }
         }
 
         if ($filterMap.Keys.Count -eq 0) {
-          Write-Host 'No test classes were discovered in the changed test files. The pipeline will run the entire affected projects as a fallback.'
+          Write-Host 'No targeted test classes were identified. The pipeline will run the entire affected test projects.'
           foreach ($proj in $testProjects) {
             $projectFullPath = Resolve-Path $proj | ForEach-Object { $_.Path }
             if (-not $filterMap.ContainsKey($projectFullPath)) {
               $filterMap[$projectFullPath] = New-Object System.Collections.Generic.List[string]
+            }
+            if (-not ($filterMap[$projectFullPath] -contains '*')) {
+              $filterMap[$projectFullPath].Add('*')
+            }
+          }
+        }
+        elseif (-not $changedTestFiles) {
+          foreach ($proj in $testProjects) {
+            $projectFullPath = Resolve-Path $proj | ForEach-Object { $_.Path }
+            if (-not $filterMap.ContainsKey($projectFullPath)) {
+              $filterMap[$projectFullPath] = New-Object System.Collections.Generic.List[string]
+            }
+            if (-not ($filterMap[$projectFullPath] -contains '*')) {
               $filterMap[$projectFullPath].Add('*')
             }
           }
