@@ -348,7 +348,7 @@ stages:
 
         function Get-ProjectRoot([string]$path) {
           $fullPath = Join-Path '$(Build.SourcesDirectory)' $path
-          if (Test-Path $fullPath -PathType Leaf -and $fullPath.EndsWith('.csproj')) {
+          if ((Test-Path $fullPath -PathType Leaf) -and $fullPath.EndsWith('.csproj')) {
             return $fullPath
           }
           $directory = Split-Path $fullPath -Parent
