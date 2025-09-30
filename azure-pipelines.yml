@@ -15,7 +15,6 @@ pr:
 variables:
   buildConfiguration: 'Release'
   dotnetVersion: '8.0.x'
-  coverageReportDir: '$(Build.SourcesDirectory)/artifacts/coverage'
   testResultsDir: '$(Build.SourcesDirectory)/artifacts/test-results'
   azureServiceConnection: 'sc-orderpulse-dev' # Set to the Azure Resource Manager service connection used for deployments
   deploymentConfigPath: 'deployment-map.json'
@@ -39,30 +38,6 @@ stages:
       displayName: 'Install .NET SDK'
       inputs:
         version: '$(dotnetVersion)'
-
-    - pwsh: |
-        $ErrorActionPreference = 'Stop'
-
-        $toolInstallRoot = if ($env:AGENT_TEMPDIRECTORY) {
-          Join-Path $env:AGENT_TEMPDIRECTORY '.dotnet-tools'
-        } elseif ($env:HOME) {
-          Join-Path $env:HOME '.dotnet-tools'
-        } elseif ($env:USERPROFILE) {
-          Join-Path $env:USERPROFILE '.dotnet-tools'
-        } else {
-          throw 'Unable to determine a writable tool installation directory.'
-        }
-
-        New-Item -ItemType Directory -Path $toolInstallRoot -Force | Out-Null
-
-        dotnet tool update --tool-path $toolInstallRoot dotnet-reportgenerator-globaltool 2>$null
-        if ($LASTEXITCODE -ne 0) {
-          dotnet tool install --tool-path $toolInstallRoot dotnet-reportgenerator-globaltool
-        }
-
-        $toolPath = $toolInstallRoot
-        Write-Host "##vso[task.prependpath]$toolPath"
-      displayName: 'Install ReportGenerator tool'
 
     - pwsh: |
         $ErrorActionPreference = 'Stop'
@@ -151,7 +126,6 @@ stages:
         }
 
         New-Item -ItemType Directory -Path '$(testResultsDir)' -Force | Out-Null
-        New-Item -ItemType Directory -Path '$(coverageReportDir)' -Force | Out-Null
 
         if (-not $changedTestFiles) {
           Write-Host 'No test files were changed in this pull request. Running the entire test suite for discovered test projects.'
@@ -275,49 +249,6 @@ stages:
         testRunTitle: 'Targeted PR tests'
         buildPlatform: '$(buildConfiguration)'
 
-    - pwsh: |
-        $ErrorActionPreference = 'Stop'
-
-        function Resolve-ReportGenerator {
-          $command = Get-Command reportgenerator -ErrorAction SilentlyContinue
-          if ($command) { return $command.Path }
-
-          $azureHomeDir = if ($env:HOME) { $env:HOME } elseif ($env:USERPROFILE) { $env:USERPROFILE } else { $null }
-          $candidate = if ($azureHomeDir) { Join-Path $azureHomeDir '.dotnet/tools/reportgenerator' } else { $null }
-
-          if (-not ($candidate -and (Test-Path $candidate))) {
-            Write-Host 'ReportGenerator was not found. Attempting installation via dotnet tool.'
-            dotnet tool update --global dotnet-reportgenerator-globaltool 2>$null
-            if ($LASTEXITCODE -ne 0) {
-              dotnet tool install --global dotnet-reportgenerator-globaltool
-            }
-          }
-
-          $command = Get-Command reportgenerator -ErrorAction SilentlyContinue
-          if ($command) { return $command.Path }
-
-          if ($candidate -and (Test-Path $candidate)) { return $candidate }
-
-          throw "ReportGenerator tool was not found on PATH or at $candidate. Ensure the installation step completed successfully."
-        }
-
-        $reportGeneratorPath = Resolve-ReportGenerator
-
-        New-Item -ItemType Directory -Path '$(coverageReportDir)' -Force | Out-Null
-
-        & $reportGeneratorPath `
-          "-reports:$(Build.SourcesDirectory)/**/coverage.cobertura.xml" `
-          "-targetdir:$(coverageReportDir)" `
-          "-reporttypes:Cobertura;HtmlInline_AzurePipelines;TextSummary"
-      displayName: 'Generate coverage reports'
-
-    - task: PublishCodeCoverageResults@2
-      displayName: 'Publish code coverage results'
-      inputs:
-        codeCoverageTool: Cobertura
-        summaryFileLocation: '$(coverageReportDir)/Cobertura.xml'
-        reportDirectory: '$(coverageReportDir)'
-        failIfCoverageEmpty: true
 
 - stage: Continuous_Integration
   displayName: 'CI build, test, and deploy'
@@ -358,7 +289,6 @@ stages:
     - pwsh: |
         $ErrorActionPreference = 'Stop'
         New-Item -ItemType Directory -Path '$(testResultsDir)' -Force | Out-Null
-        New-Item -ItemType Directory -Path '$(coverageReportDir)' -Force | Out-Null
 
         $testProjects = git ls-files '*.csproj' | Where-Object {
           $content = Get-Content $_ -Raw
@@ -376,42 +306,6 @@ stages:
         }
       displayName: 'Run full test suite with coverage'
 
-    - pwsh: |
-        $ErrorActionPreference = 'Stop'
-
-        function Resolve-ReportGenerator {
-          $command = Get-Command reportgenerator -ErrorAction SilentlyContinue
-          if ($command) { return $command.Path }
-
-          $home = if ($env:HOME) { $env:HOME } elseif ($env:USERPROFILE) { $env:USERPROFILE } else { $null }
-          $candidate = if ($home) { Join-Path $home '.dotnet/tools/reportgenerator' } else { $null }
-
-          if (-not ($candidate -and (Test-Path $candidate))) {
-            Write-Host 'ReportGenerator was not found. Attempting installation via dotnet tool.'
-            dotnet tool update --global dotnet-reportgenerator-globaltool 2>$null
-            if ($LASTEXITCODE -ne 0) {
-              dotnet tool install --global dotnet-reportgenerator-globaltool
-            }
-          }
-
-          $command = Get-Command reportgenerator -ErrorAction SilentlyContinue
-          if ($command) { return $command.Path }
-
-          if ($candidate -and (Test-Path $candidate)) { return $candidate }
-
-          throw "ReportGenerator tool was not found on PATH or at $candidate. Ensure the installation step completed successfully."
-        }
-
-        $reportGeneratorPath = Resolve-ReportGenerator
-
-        New-Item -ItemType Directory -Path '$(coverageReportDir)' -Force | Out-Null
-
-        & $reportGeneratorPath `
-          "-reports:$(Build.SourcesDirectory)/**/coverage.cobertura.xml" `
-          "-targetdir:$(coverageReportDir)" `
-          "-reporttypes:Cobertura;HtmlInline_AzurePipelines;TextSummary"
-      displayName: 'Generate coverage reports'
-
     - task: PublishTestResults@2
       displayName: 'Publish full test results'
       inputs:
@@ -421,14 +315,6 @@ stages:
         mergeTestResults: true
         testRunTitle: 'Full test suite'
         buildPlatform: '$(buildConfiguration)'
-
-    - task: PublishCodeCoverageResults@2
-      displayName: 'Publish code coverage results'
-      inputs:
-        codeCoverageTool: Cobertura
-        summaryFileLocation: '$(coverageReportDir)/Cobertura.xml'
-        reportDirectory: '$(coverageReportDir)'
-        failIfCoverageEmpty: true
 
     - pwsh: |
         $ErrorActionPreference = 'Stop'
