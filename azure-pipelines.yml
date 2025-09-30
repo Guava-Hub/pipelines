@@ -41,8 +41,17 @@ stages:
         version: '$(dotnetVersion)'
 
     - pwsh: |
-        dotnet tool install --global dotnet-reportgenerator-globaltool
-        Write-Host "##vso[task.prependpath]$env:USERPROFILE\.dotnet\tools"
+        $ErrorActionPreference = 'Stop'
+
+        dotnet tool update --global dotnet-reportgenerator-globaltool 2>$null
+        if ($LASTEXITCODE -ne 0) {
+          dotnet tool install --global dotnet-reportgenerator-globaltool
+        }
+
+        $home = if ($env:HOME) { $env:HOME } else { $env:USERPROFILE }
+        $dotnetFolder = Join-Path $home '.dotnet'
+        $toolPath = Join-Path $dotnetFolder 'tools'
+        Write-Host "##vso[task.prependpath]$toolPath"
       displayName: 'Install ReportGenerator tool'
 
     - pwsh: |
@@ -236,10 +245,12 @@ stages:
         buildPlatform: '$(buildConfiguration)'
 
     - script: |
+        export PATH="$PATH:$HOME/.dotnet/tools"
+        mkdir -p "$(coverageReportDir)"
         reportgenerator -reports:"$(Build.SourcesDirectory)/**/coverage.cobertura.xml" -targetdir:"$(coverageReportDir)" -reporttypes:"Cobertura;HtmlInline_AzurePipelines;TextSummary"
       displayName: 'Generate coverage reports'
 
-    - task: PublishCodeCoverageResults@1
+    - task: PublishCodeCoverageResults@2
       displayName: 'Publish code coverage results'
       inputs:
         codeCoverageTool: Cobertura
@@ -305,6 +316,8 @@ stages:
       displayName: 'Run full test suite with coverage'
 
     - script: |
+        export PATH="$PATH:$HOME/.dotnet/tools"
+        mkdir -p "$(coverageReportDir)"
         reportgenerator -reports:"$(Build.SourcesDirectory)/**/coverage.cobertura.xml" -targetdir:"$(coverageReportDir)" -reporttypes:"Cobertura;HtmlInline_AzurePipelines;TextSummary"
       displayName: 'Generate coverage reports'
 
@@ -318,7 +331,7 @@ stages:
         testRunTitle: 'Full test suite'
         buildPlatform: '$(buildConfiguration)'
 
-    - task: PublishCodeCoverageResults@1
+    - task: PublishCodeCoverageResults@2
       displayName: 'Publish code coverage results'
       inputs:
         codeCoverageTool: Cobertura
