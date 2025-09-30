@@ -330,9 +330,10 @@ stages:
         $history = git rev-list --max-count=2 HEAD
         $previousCommit = ($history | Select-Object -Last 1)
 
-        if (-not $previousCommit) {
-          Write-Host 'Only one commit detected on branch. All projects will be considered changed.'
-          $changedPaths = git ls-files '*.csproj'
+        if ([string]::IsNullOrWhiteSpace($previousCommit) -or $previousCommit -eq $currentCommit) {
+          Write-Host 'Only one commit detected on branch or unable to resolve previous commit. All tracked files will be evaluated.'
+          $changedPaths = git ls-files
+          $previousCommit = $null
         }
         else {
           Write-Host "Current commit: $currentCommit"
@@ -340,7 +341,17 @@ stages:
           $changedPaths = git diff --name-only $previousCommit $currentCommit
         }
 
-        $changedPaths = $changedPaths | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+        $changedPaths = $changedPaths | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique
+
+        if ($previousCommit) {
+          if ($changedPaths) {
+            Write-Host 'Detected the following paths changed between the last two commits:'
+            $changedPaths | ForEach-Object { Write-Host " - $_" }
+          }
+          else {
+            Write-Host 'No file changes were detected between the last two commits.'
+          }
+        }
 
         if (-not $changedPaths) {
           Write-Host 'No project changes detected. Skipping deployment phase.'
@@ -367,7 +378,15 @@ stages:
         $projectsToDeploy = New-Object System.Collections.Generic.HashSet[string]
         foreach ($path in $changedPaths) {
           $proj = Get-ProjectRoot $path
-          if ($proj) { $projectsToDeploy.Add($proj) | Out-Null }
+          if ($proj) {
+            if (-not $projectsToDeploy.Contains($proj)) {
+              Write-Host "Mapped changed path '$path' to project '$proj'"
+            }
+            $projectsToDeploy.Add($proj) | Out-Null
+          }
+          else {
+            Write-Host "No deployable project mapping found for changed path '$path'"
+          }
         }
 
         if ($projectsToDeploy.Count -eq 0) {
